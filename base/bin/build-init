@@ -20,3 +20,8 @@ if [[ "${HTTP_USER}" != "" ]] && [[ "${HTTP_PASS}" != "" ]]; then
 	build-exec "echo APACHE_BASIC_AUTH_USER=$HTTP_USER | tee -a .docksal/docksal-local.env"
 	build-exec "echo APACHE_BASIC_AUTH_PASS=$HTTP_PASS | tee -a .docksal/docksal-local.env"
 fi
+
+# Pass secrets to sandbox
+# A "secret" is any environment variable that starts with "SECRET_"
+secrets="$(env | grep 'SECRET_')"
+build-exec "echo '$secrets' | tee -a .docksal/docksal-local.env >/dev/null"
