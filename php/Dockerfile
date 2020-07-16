@@ -5,6 +5,7 @@ USER root
 
 RUN set -xe; \
 	apk add --update --no-cache \
+		mysql-client \
 		php7 \
 		php7-ctype \
 		php7-curl \
@@ -13,7 +14,9 @@ RUN set -xe; \
 		php7-json \
 		php7-mbstring \
 		php7-openssl \
+		php7-pdo_mysql \
 		php7-phar \
+		php7-posix \
 		php7-simplexml \
 		php7-tokenizer \
 		php7-xml \

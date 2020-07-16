@@ -3,10 +3,14 @@
 # Configures build environment variables
 # This file should be sources at the beginning of a build
 #
-# Usage source build-env
+# Usage: source build-env
 
 # IMPORTANT: This script is sourced in the build environment.
 # Any settings set here using set/trap/etc. will propagate to all build steps.
+
+# Ensure this script is sourced
+# Credit: https://stackoverflow.com/a/28776166
+(return 0 2>/dev/null) || (echo "This script must be sourced! (source build-env)"; exit 1)
 
 # -------------------- Constants -------------------- #
 
@@ -14,6 +18,7 @@ DEBUG=${DEBUG:-0}  # `DEBUG=1 build-env` to run with debugging turned ON
 DOCKER_HOST_TUNNEL=localhost:2374
 GIT_USER_EMAIL=${GIT_USER_EMAIL:-ci@docksal.io}
 GIT_USER_NAME=${GIT_USER_NAME:-Docksal CI}
+REMOTE_BUILD_DIR_CLEANUP=${REMOTE_BUILD_DIR_CLEANUP:-1} # Default to re-initializing environment.
 
 # These are used to generate the sandbox sub-domain (branch-project.example.com)
 # There is a limit of 63 characters for any part of the domain name.
@@ -36,6 +41,35 @@ echo-debug ()
 safe_string ()
 {
 	(sed -e 's/[^A-Za-z0-9]/-/g' | awk '{print tolower($0)}') <<< "$1"
+}
+
+# Parses repo URL and return a specific chunk
+# @url Git repo URL
+# @chunk one of: protocol, separator, hostname, service, owner, repo
+parse_repo_url ()
+{
+	url="$1"
+	chunk="$2"
+
+	# Credit: https://serverfault.com/questions/417241/extract-repository-name-from-github-url-in-bash/917253#917253
+	re="^(https|git)(:\/\/|@)([^\/:]+)[\/:]([^\/:]+)\/(.+).git$"
+	# Parse the URL
+	if [[ ${url} =~ ${re} ]]; then
+		protocol=${BASH_REMATCH[1]}
+		separator=${BASH_REMATCH[2]}
+		hostname=${BASH_REMATCH[3]}
+		owner=${BASH_REMATCH[4]}
+		repo=${BASH_REMATCH[5]}
+
+		# Derived values
+		[[ "$hostname" == "github.com" ]] && service="github"
+		[[ "$hostname" == "bitbucket.org" ]] && service="bitbucket"
+	else
+		return 1
+	fi
+
+	# Return the requested chunk
+	if [[ "$chunk" != "" ]]; then echo "${!chunk}"; fi
 }
 
 # Initial build environment configuration
@@ -108,6 +142,21 @@ build_env ()
 		export BUILD_DIR="$CI_PROJECT_DIR"
 	fi
 
+	# Support for Jenkins Git SCM
+	if [[ "$JENKINS_URL" != "" ]]; then
+		echo-debug "Detected Jenkins build environment"
+		export JENKINS_CI="true"
+		export GIT_REPO_SERVICE=$(parse_repo_url "$GIT_URL" service)
+		export GIT_REPO_OWNER=$(parse_repo_url "$GIT_URL" owner)
+		export GIT_REPO_NAME=$(parse_repo_url "$GIT_URL" repo)
+		export GIT_REPO_URL="$GIT_URL"
+		export GIT_BRANCH_NAME="$GIT_BRANCH"
+		export GIT_COMMIT_HASH="$GIT_COMMIT"
+
+		export BUILD_ID="$BUILD_ID"
+		export BUILD_DIR="$WORKSPACE"
+	fi
+
 	# For debug purposes these variables can be set manually.
 	# If they are empty here, then we cannot proceed.
 	if [[ "$GIT_REPO_URL" == "" ]] || [[ "$GIT_BRANCH_NAME" == "" ]] || [[ "$GIT_COMMIT_HASH" == "" ]]; then
@@ -140,20 +189,30 @@ build_env ()
 	export DOCKSAL_HOST="${DOCKSAL_HOST:-$DOCKSAL_HOST_IP.nip.io}"
 	sed -i "s/HostName DOCKSAL_HOST/HostName $DOCKSAL_HOST/g" $HOME/.ssh/config
 
+	# Use DOCKSAL_HOST_SSH_PORT if set, otherwise use default ssh port (22)
+	export DOCKSAL_HOST_SSH_PORT="${DOCKSAL_HOST_SSH_PORT:-22}"
+	sed -i "s/# Port DOCKSAL_HOST_SSH_PORT/Port $DOCKSAL_HOST_SSH_PORT/g" $HOME/.ssh/config
+
 	# Set the sandbox user name in agent's SSH config
 	sed -i "s/User DOCKSAL_HOST_USER/User $DOCKSAL_HOST_USER/g" $HOME/.ssh/config
 
-	# Allow setting DOCKSAL_DOMAIN individually from DOCKSAL_HOST. Default to DOCKSAL_HOST if not set.
-	# This is useful when working with CDNs/ELBs/WAFs/etc (when DOCKSAL_DOMAIN is different from the DOCKSAL_HOST).
-	# Make sure domain name is lowercase
-	export DOCKSAL_DOMAIN="$(echo -n ${DOCKSAL_DOMAIN:-$DOCKSAL_HOST} | awk '{print tolower($0)}')"
+	# If a custom domains was not set via agent's build environment, derive the domain from the branch name.
+	if [[ "$SANDBOX_DOMAIN" == "" ]]; then
+		# Allow setting DOCKSAL_DOMAIN individually from DOCKSAL_HOST. Default to DOCKSAL_HOST if not set.
+		# This is useful when working with CDNs/ELBs/WAFs/etc (when DOCKSAL_DOMAIN is different from the DOCKSAL_HOST).
+		# Make sure domain name is lowercase
+		export DOCKSAL_DOMAIN="$(echo -n ${DOCKSAL_DOMAIN:-$DOCKSAL_HOST} | awk '{print tolower($0)}')"
 
-	# Use "flat" sub-domains (e.g. branch--project.example.com) and not multi-sub-domains (e.g. branch.project.example.com)
-	# This allows using a single wildcard cert for the entire sandbox server.
-	# Note: A wildcard cert for "*.example.com", will only cover "sub-domain.example.dom", but not
-	# "www.sub-domain.example.com".
-	# NOTE: The length of any one label (sub-domain) in the domain name is limited to 63 octets (characters).
-	export DOMAIN="${BRANCH_NAME_SAFE}--${REPO_NAME_SAFE}.${DOCKSAL_DOMAIN}"
+		# Use "flat" sub-domains (e.g. branch--project.example.com) and not multi-sub-domains (e.g. branch.project.example.com)
+		# This allows using a single wildcard cert for the entire sandbox server.
+		# Note: A wildcard cert for "*.example.com", will only cover "sub-domain.example.dom", but not
+		# "www.sub-domain.example.com".
+		# NOTE: The length of any one label (sub-domain) in the domain name is limited to 63 octets (characters).
+		export SANDBOX_DOMAIN="${BRANCH_NAME_SAFE}--${REPO_NAME_SAFE}.${DOCKSAL_DOMAIN}"
+	fi
+	# Backward compatibility with ci-agent versions prior to 1.6.1.
+	# This variable may be used in custom Slack notifications.
+	export DOMAIN="$SANDBOX_DOMAIN"
 
 	# Default to rsync for sandbox codebase initialization
 	export REMOTE_CODEBASE_METHOD="${REMOTE_CODEBASE_METHOD:-rsync}"
